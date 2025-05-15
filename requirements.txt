@@ -3,3 +3,4 @@ transformers
 datasets
 numpy
 jupyter
+hf_xet

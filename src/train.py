@@ -27,7 +27,6 @@ def save_checkpoint(model, optimizer, epoch, loss, path="checkpoints"):
     torch.save(checkpoint, os.path.join(path, f"checkpoint_epoch_{epoch}.pt"))
 
 def train_model(model, train_loader, valid_loader, num_epochs=10, device="cuda", lr=1e-4):
-    """Entrena el modelo Seq2Seq."""
     setup_logging()
     model = model.to(device)
     optimizer = Adam(model.parameters(), lr=lr)
@@ -54,11 +53,14 @@ def train_model(model, train_loader, valid_loader, num_epochs=10, device="cuda",
             local_reps = torch.stack(chunk_outputs, dim=0)
             H = model.encoder.global_encoder(local_reps)
             
-            schema_logits = model.decoder.schema_decoder(schema_ids[:-1], H)
-            schema_loss = loss_fn(schema_logits.transpose(0, 1), schema_ids[1:])
+            # Corrección: cortar la dimensión de secuencia, no el lote
+            schema_logits = model.decoder.schema_decoder(schema_ids[:, :-1], H)  # [seq_len-1, batch_size, vocab_size]
+            schema_loss = loss_fn(schema_logits.transpose(0, 1), schema_ids[:, 1:])  # [batch_size, seq_len-1, vocab_size]
             
-            section_logits, attn_weights = model.decoder.section_decoder(summary_ids[:-1], torch.cat([H, local_reps], dim=-1).transpose(0, 1))
-            section_loss = loss_fn(section_logits, summary_ids[1:], attn_weights)
+            # Corrección similar para section_decoder
+            output, attn_weights = model.decoder.section_decoder(summary_ids[:, :-1], torch.cat([H, local_reps], dim=-1).transpose(0, 1))
+            section_logits = model.decoder.section_decoder.fc_out(output)  # Asegúrate de que fc_out es nn.Linear(768, 30522)
+            section_loss = loss_fn(section_logits, summary_ids[:, 1:], attn_weights)
             
             loss = schema_loss + section_loss
             loss.backward()

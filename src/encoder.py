@@ -47,16 +47,18 @@ class HierarchicalEncoder(nn.Module):
         chunks = [input_ids[i:i + self.chunk_size] for i in range(0, total_length, self.chunk_size)]
         return chunks
 
-    def forward(self, document, max_chunks=None):
+    def forward(self, document, max_chunks=None, device='cpu'):
         """
         Procesa un documento completo y devuelve representaciones jerárquicas.
         
         Args:
             document (str): Texto del documento completo.
             max_chunks (int, optional): Número máximo de fragmentos para controlar memoria.
+            device (str, optional): Dispositivo donde ejecutar las operaciones ('cpu' o 'cuda').
         
         Returns:
             torch.Tensor: Representaciones globales [num_chunks, batch_size, hidden_size]
+            torch.Tensor: Representaciones locales [num_chunks, batch_size, hidden_size]
         """
         # Tokenizar el documento
         tokens = self.tokenizer.tokenize(document)
@@ -68,8 +70,8 @@ class HierarchicalEncoder(nn.Module):
         # Procesar cada fragmento con el encoder local
         local_reps = []
         for chunk in chunks:
-            input_ids_chunk = torch.tensor([chunk], dtype=torch.long)
-            attention_mask = torch.ones_like(input_ids_chunk)
+            input_ids_chunk = torch.tensor([chunk], dtype=torch.long).to(device)
+            attention_mask = torch.ones_like(input_ids_chunk).to(device)
             h_i = self.local_encoder(input_ids_chunk, attention_mask)
             local_reps.append(h_i)
         
@@ -79,4 +81,4 @@ class HierarchicalEncoder(nn.Module):
         # Pasar por el encoder global
         global_reps = self.global_encoder(local_reps)
         
-        return global_reps
+        return global_reps, local_reps

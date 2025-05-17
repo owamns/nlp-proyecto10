@@ -4,6 +4,18 @@ from tqdm import tqdm
 from seq2seq import HierarchicalSeq2Seq
 from dataset import get_dataloader
 from loss import CombinedLoss
+import os
+
+def save_checkpoint(model, optimizer, epoch, loss, path="checkpoints"):
+    """Guarda un checkpoint del modelo."""
+    os.makedirs(path, exist_ok=True)
+    checkpoint = {
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "epoch": epoch,
+        "loss": loss
+    }
+    torch.save(checkpoint, os.path.join(path, f"checkpoint_epoch_{epoch}.pt"))
 
 def train_model(model, train_loader, valid_loader, num_epochs=10, device="cuda", lr=1e-4):
     """Entrena el modelo Seq2Seq."""
@@ -21,23 +33,20 @@ def train_model(model, train_loader, valid_loader, num_epochs=10, device="cuda",
             
             optimizer.zero_grad()
             
-            # Procesar chunks con el encoder
             chunk_outputs = []
             for chunk in chunks:
                 input_ids = chunk["input_ids"].to(device)
                 attention_mask = chunk["attention_mask"].to(device)
-                if input_ids.numel() > 0:  # Ignorar chunks vacíos
+                if input_ids.numel() > 0:
                     chunk_output = model.encoder.local_encoder(input_ids, attention_mask)
                     chunk_outputs.append(chunk_output)
             
             local_reps = torch.stack(chunk_outputs, dim=0)
             H = model.encoder.global_encoder(local_reps)
             
-            # Generar esquema
             schema_logits = model.decoder.schema_decoder(schema_ids[:-1], H)
             schema_loss = loss_fn(schema_logits.transpose(0, 1), schema_ids[1:])
             
-            # Generar secciones (simplificado: usar summary como target)
             section_logits, attn_weights = model.decoder.section_decoder(summary_ids[:-1], torch.cat([H, local_reps], dim=-1).transpose(0, 1))
             section_loss = loss_fn(section_logits, summary_ids[1:], attn_weights)
             
@@ -46,4 +55,6 @@ def train_model(model, train_loader, valid_loader, num_epochs=10, device="cuda",
             optimizer.step()
             total_loss += loss.item()
         
-        print(f"Epoch {epoch+1}, Loss: {total_loss / len(train_loader)}")
+        avg_loss = total_loss / len(train_loader)
+        print(f"Epoch {epoch+1}, Loss: {avg_loss}")
+        save_checkpoint(model, optimizer, epoch + 1, avg_loss)

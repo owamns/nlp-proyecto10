@@ -39,13 +39,11 @@ def collate_fn(batch):
         summary_ids.append(item["summary_ids"])
         summary_masks.append(item["summary_mask"])
     
-    # Aplicar padding a schema y summary
     schema_ids = pad_sequence(schema_ids, batch_first=True, padding_value=0)
     schema_masks = pad_sequence(schema_masks, batch_first=True, padding_value=0)
     summary_ids = pad_sequence(summary_ids, batch_first=True, padding_value=0)
     summary_masks = pad_sequence(summary_masks, batch_first=True, padding_value=0)
     
-    # Estructurar chunks para el encoder
     chunked_data = []
     for i in range(max_chunks):
         chunk_batch = {
@@ -62,7 +60,7 @@ def collate_fn(batch):
         "summary_mask": summary_masks
     }
 
-def get_dataloader(processed_data, batch_size=4):
-    """Crea un DataLoader con padding."""
+def get_dataloader(processed_data, batch_size=4, num_workers=4):
+    """Crea un DataLoader optimizado para datasets grandes."""
     dataset = CNNDailyMailDataset(processed_data)
-    return DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn, num_workers=num_workers, pin_memory=True)

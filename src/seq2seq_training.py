@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torch.cuda.amp import autocast, GradScaler
 from transformers import BertTokenizer
 from data_preprocessing import load_cnn_dailymail, preprocess_data
 from dataset import get_dataloader
@@ -10,50 +9,77 @@ from seq2seq import HierarchicalSeq2Seq
 from loss import CombinedLoss
 from tqdm import tqdm
 import os
+import logging
+from torch.amp import autocast, GradScaler
 
-# Configurar manejo de memoria de PyTorch
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+# Configurar logging para depuración
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # Configuraciones
-device = torch.device("cuda")
-batch_size = 1  # Reducido para minimizar uso de memoria
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+batch_size = 1
 num_epochs = 10
 learning_rate = 1e-4
-chunk_size = 256  # Reducido de 512
-max_chunks = 3    # Reducido de 5
-checkpoint_dir = "./checkpoints"
+chunk_size = 128
+max_chunks = 2
+accum_steps = 1
+checkpoint_dir = os.path.abspath("./checkpoints")  # Usar path absoluto
 os.makedirs(checkpoint_dir, exist_ok=True)
-accum_steps = 4   # Acumulación de gradientes para simular batch_size=4
+
+# Verificar que el directorio es escribible
+try:
+    test_file = os.path.join(checkpoint_dir, "test.txt")
+    with open(test_file, 'w') as f:
+        f.write("test")
+    os.remove(test_file)
+    logger.info(f"Directorio {checkpoint_dir} es escribible")
+except Exception as e:
+    logger.error(f"Error: No se puede escribir en {checkpoint_dir}: {str(e)}")
+    raise
+
+# Configurar PyTorch para evitar fragmentación
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 # Cargar y preprocesar datos
-print("Cargando y preprocesando datos...")
+logger.info("Cargando y preprocesando datos...")
 train_data, valid_data = load_cnn_dailymail()
-tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+# train_data = train_data.select(range(100))  # Comentar para usar dataset completo
+tokenizer = BertTokenizer.from_pretrained('prajjwal1/bert-tiny')
 processed_train = preprocess_data(train_data, tokenizer, chunk_size, max_chunks)
 processed_valid = preprocess_data(valid_data, tokenizer, chunk_size, max_chunks)
 
 # Crear dataloaders
-train_loader = get_dataloader(processed_train, batch_size=batch_size, num_workers=2)
-valid_loader = get_dataloader(processed_valid, batch_size=batch_size, num_workers=2)
+train_loader = get_dataloader(processed_train, batch_size=batch_size, num_workers=0)
+valid_loader = get_dataloader(processed_valid, batch_size=batch_size, num_workers=0)
 
 # Instanciar modelo
 model = HierarchicalSeq2Seq(
     vocab_size=tokenizer.vocab_size,
-    hidden_size=768,
-    num_layers=2,
-    num_heads=8,
+    hidden_size=128,
+    num_layers=1,
+    num_heads=4,
     chunk_size=chunk_size
 ).to(device)
 
-# Optimizador, función de pérdida y escalador para precisión mixta
+# Optimizador, pérdida y escalador
 optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 loss_fn = CombinedLoss(lambda_penalty=0.1).to(device)
-scaler = GradScaler()
+scaler = GradScaler(device='cuda')
 
 # Máscara autoregresiva
 def generate_square_subsequent_mask(sz):
     mask = torch.triu(torch.ones(sz, sz), diagonal=1).bool()
     return mask.to(device)
+
+# Función para guardar checkpoint
+def save_checkpoint(model, path):
+    try:
+        torch.save(model.state_dict(), path)
+        logger.info(f"Checkpoint guardado exitosamente en: {path}")
+    except Exception as e:
+        logger.error(f"Error al guardar checkpoint en {path}: {str(e)}")
+        raise
 
 # Función de entrenamiento
 def train_epoch(model, dataloader, optimizer, loss_fn, accum_steps):
@@ -65,30 +91,23 @@ def train_epoch(model, dataloader, optimizer, loss_fn, accum_steps):
         schema_ids = batch["schema_ids"].to(device)
         summary_ids = batch["summary_ids"].to(device)
 
-        # Precisión mixta
-        with autocast():
-            # Encoder
+        with autocast(device_type='cuda'):
             local_reps = []
-            batch_size = schema_ids.size(0)
             for chunk in chunks:
                 input_ids = chunk["input_ids"]
                 attention_mask = chunk["attention_mask"]
-                if input_ids.size(0) == batch_size and input_ids.numel() > 0:
+                if input_ids.numel() > 0:
                     h_i = model.encoder.local_encoder(input_ids, attention_mask)
                     local_reps.append(h_i)
-            if not local_reps:
-                continue
             local_reps = torch.stack(local_reps, dim=0)
             H = model.encoder.global_encoder(local_reps)
 
-            # Schema Decoder
             tgt_schema = schema_ids[:, :-1]
             target_schema = schema_ids[:, 1:]
             logits_schema = model.decoder.schema_decoder(tgt_schema, H)
             logits_schema = logits_schema.transpose(0, 1)
             loss_schema = loss_fn(logits_schema, target_schema)
 
-            # Section Decoder
             memory = torch.cat([H, local_reps], dim=-1).transpose(0, 1)
             tgt_section = summary_ids[:, :-1]
             target_section = summary_ids[:, 1:]
@@ -97,77 +116,30 @@ def train_epoch(model, dataloader, optimizer, loss_fn, accum_steps):
             logits_section = model.decoder.section_decoder.fc_out(output)
             loss_section = loss_fn(logits_section, target_section, attn_weights)
 
-            # Pérdida total
-            loss = (loss_schema + loss_section) / accum_steps
+            loss = loss_schema + loss_section
 
-        # Acumulación de gradientes
         scaler.scale(loss).backward()
-        if (i + 1) % accum_steps == 0 or (i + 1) == len(dataloader):
-            scaler.step(optimizer)
-            scaler.update()
-            optimizer.zero_grad()
+        scaler.step(optimizer)
+        scaler.update()
+        optimizer.zero_grad()
+        torch.cuda.empty_cache()
 
-        total_loss += loss.item() * accum_steps
-        torch.cuda.empty_cache()  # Liberar caché
+        total_loss += loss.item()
+        del chunks, schema_ids, summary_ids, local_reps, H, memory, logits_schema, logits_section, output, attn_weights, loss
 
-    return total_loss / len(dataloader)
-
-# Función de validación
-def validate_epoch(model, dataloader, loss_fn):
-    model.eval()
-    total_loss = 0
-    with torch.no_grad():
-        for batch in tqdm(dataloader, desc="Validando"):
-            chunks = [{k: v.to(device) for k, v in chunk.items()} for chunk in batch["chunks"]]
-            schema_ids = batch["schema_ids"].to(device)
-            summary_ids = batch["summary_ids"].to(device)
-
-            with autocast():
-                local_reps = []
-                batch_size = schema_ids.size(0)
-                for chunk in chunks:
-                    input_ids = chunk["input_ids"]
-                    attention_mask = chunk["attention_mask"]
-                    if input_ids.size(0) == batch_size and input_ids.numel() > 0:
-                        h_i = model.encoder.local_encoder(input_ids, attention_mask)
-                        local_reps.append(h_i)
-                if not local_reps:
-                    continue
-                local_reps = torch.stack(local_reps, dim=0)
-                H = model.encoder.global_encoder(local_reps)
-
-                # Schema Decoder
-                tgt_schema = schema_ids[:, :-1]
-                target_schema = schema_ids[:, 1:]
-                logits_schema = model.decoder.schema_decoder(tgt_schema, H)
-                logits_schema = logits_schema.transpose(0, 1)
-                loss_schema = loss_fn(logits_schema, target_schema)
-
-                # Section Decoder
-                memory = torch.cat([H, local_reps], dim=-1).transpose(0, 1)
-                tgt_section = summary_ids[:, :-1]
-                target_section = summary_ids[:, 1:]
-                tgt_mask = generate_square_subsequent_mask(tgt_section.size(1))
-                output, attn_weights = model.decoder.section_decoder(tgt_section, memory, tgt_mask=tgt_mask)
-                logits_section = model.decoder.section_decoder.fc_out(output)
-                loss_section = loss_fn(logits_section, target_section, attn_weights)
-
-                loss = loss_schema + loss_section
-            total_loss += loss.item()
-            torch.cuda.empty_cache()
     return total_loss / len(dataloader)
 
 # Bucle principal de entrenamiento
 for epoch in range(num_epochs):
-    print(f"\nEpoca {epoch + 1}/{num_epochs}")
+    logger.info(f"\nEpoca {epoch + 1}/{num_epochs}")
     train_loss = train_epoch(model, train_loader, optimizer, loss_fn, accum_steps)
-    print(f"Pérdida de entrenamiento: {train_loss:.4f}")
+    logger.info(f"Pérdida de entrenamiento: {train_loss:.4f}")
 
-    val_loss = validate_epoch(model, valid_loader, loss_fn)
-    print(f"Pérdida de validación: {val_loss:.4f}")
+    # Guardar checkpoint por época
+    checkpoint_path = os.path.join(checkpoint_dir, f"model_epoch_{epoch + 1}.pth")
+    save_checkpoint(model, checkpoint_path)
 
-    # Guardar checkpoint
-    torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"model_epoch_{epoch + 1}.pth"))
-
-print("Entrenamiento completado!")
-torch.save(model.state_dict(), os.path.join(checkpoint_dir, "hierarchical_seq2seq_final.pth"))
+logger.info("Entrenamiento completado!")
+# Guardar modelo final
+final_checkpoint_path = os.path.join(checkpoint_dir, "hierarchical_seq2seq_final.pth")
+save_checkpoint(model, final_checkpoint_path)

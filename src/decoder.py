@@ -12,8 +12,9 @@ class SchemaDecoder(nn.Module):
         self.fc_out = nn.Linear(hidden_size, vocab_size)
 
     def forward(self, tgt, memory):
-        tgt_pos = torch.arange(0, tgt.size(0)).unsqueeze(1).to(tgt.device)
+        tgt_pos = torch.arange(0, tgt.size(1)).unsqueeze(0).to(tgt.device)
         tgt_emb = self.embedding(tgt) + self.pos_encoder(tgt_pos)
+        tgt_emb = tgt_emb.transpose(0, 1)
         output = self.transformer_decoder(tgt_emb, memory)
         logits = self.fc_out(output)
         return logits

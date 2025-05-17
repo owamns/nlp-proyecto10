@@ -2,12 +2,13 @@ from datasets import load_dataset
 from transformers import BertTokenizer
 import torch
 
+
 def load_cnn_dailymail():
     """Carga el dataset CNN/DailyMail completo."""
-    dataset = load_dataset("cnn_dailymail", "3.0.0")
-    train_data = dataset["train"]
-    valid_data = dataset["validation"]
+    train_data = load_dataset("cnn_dailymail", "3.0.0", split="train")
+    valid_data = load_dataset("cnn_dailymail", "3.0.0", split="validation")
     return train_data, valid_data
+
 
 def dynamic_chunking(input_ids, chunk_size=512, max_chunks=None):
     """Fragmenta dinámicamente un documento."""
@@ -19,6 +20,7 @@ def dynamic_chunking(input_ids, chunk_size=512, max_chunks=None):
         chunk_size = total_length // max_chunks + 1
     
     return [input_ids[i:i + chunk_size] for i in range(0, total_length, chunk_size)]
+
 
 def preprocess_article(article, tokenizer, chunk_size=512, max_chunks=5):
     """Tokeniza y fragmenta un artículo."""
@@ -33,15 +35,22 @@ def preprocess_article(article, tokenizer, chunk_size=512, max_chunks=5):
         chunked_data.append({"input_ids": chunk_ids, "attention_mask": chunk_mask})
     return chunked_data
 
+
 def generate_schema_target(article, tokenizer, max_length=50):
     """Genera un esquema simulado (primeras frases del artículo)."""
-    sentences = article.split(". ")[:3]  # Tomar primeras 3 oraciones
+    sentences = article.split(". ")[:3]
     schema_text = ". ".join(sentences)
     tokens = tokenizer(schema_text, truncation=True, max_length=max_length, return_tensors="pt")
     return tokens["input_ids"].squeeze(), tokens["attention_mask"].squeeze()
 
+
 def preprocess_data(data, tokenizer, chunk_size=512, max_chunks=5):
     """Preprocesa el dataset, incluyendo targets para esquema y secciones."""
+    if isinstance(data, dict):
+        keys = list(data.keys())
+        length = len(data[keys[0]])
+        data = [ {k: data[k][i] for k in keys} for i in range(length) ]
+    
     processed = []
     for example in data:
         article = example["article"]
@@ -59,9 +68,3 @@ def preprocess_data(data, tokenizer, chunk_size=512, max_chunks=5):
             "summary_mask": summary_tokens["attention_mask"].squeeze()
         })
     return processed
-
-if __name__ == "__main__":
-    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
-    train_data, valid_data = load_cnn_dailymail()
-    processed_train = preprocess_data(train_data.select(range(100)), tokenizer)
-    print(f"Procesados {len(processed_train)} ejemplos de entrenamiento.")

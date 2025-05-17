@@ -9,24 +9,42 @@ def load_cnn_dailymail():
     valid_data = dataset["validation"]
     return train_data, valid_data
 
-def preprocess_article(article, tokenizer, max_length=512):
-    """Tokeniza un artículo y devuelve input_ids y attention_mask."""
-    tokens = tokenizer(article, truncation=True, max_length=max_length, return_tensors="pt", padding=False)
-    return tokens["input_ids"].squeeze(), tokens["attention_mask"].squeeze()
+def dynamic_chunking(input_ids, chunk_size=512, max_chunks=None):
+    """Fragmenta dinámicamente un documento."""
+    total_length = len(input_ids)
+    if total_length <= chunk_size:
+        return [input_ids]
+    
+    if max_chunks and total_length > chunk_size * max_chunks:
+        chunk_size = total_length // max_chunks + 1
+    
+    return [input_ids[i:i + chunk_size] for i in range(0, total_length, chunk_size)]
 
-def preprocess_data(data, tokenizer):
-    """Preprocesa el dataset, tokenizando artículos y resúmenes."""
+def preprocess_article(article, tokenizer, chunk_size=512, max_chunks=5):
+    """Tokeniza y fragmenta un artículo."""
+    tokens = tokenizer.tokenize(article)
+    input_ids = tokenizer.convert_tokens_to_ids(tokens)
+    chunks = dynamic_chunking(input_ids, chunk_size, max_chunks)
+    
+    chunked_data = []
+    for chunk in chunks:
+        chunk_ids = torch.tensor(chunk)
+        chunk_mask = torch.ones_like(chunk_ids)
+        chunked_data.append({"input_ids": chunk_ids, "attention_mask": chunk_mask})
+    return chunked_data
+
+def preprocess_data(data, tokenizer, chunk_size=512, max_chunks=5):
+    """Preprocesa el dataset, fragmentando artículos y tokenizando resúmenes."""
     processed = []
     for example in data:
         article = example["article"]
         summary = example["highlights"]
         
-        article_ids, article_mask = preprocess_article(article, tokenizer)
+        chunked_article = preprocess_article(article, tokenizer, chunk_size, max_chunks)
         summary_tokens = tokenizer(summary, truncation=True, max_length=128, return_tensors="pt")
         
         processed.append({
-            "article_ids": article_ids,
-            "article_mask": article_mask,
+            "chunks": chunked_article,
             "summary_ids": summary_tokens["input_ids"].squeeze(),
             "summary_mask": summary_tokens["attention_mask"].squeeze()
         })

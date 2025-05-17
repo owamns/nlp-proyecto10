@@ -5,8 +5,8 @@ import torch
 
 def load_cnn_dailymail():
     """Carga el dataset CNN/DailyMail completo."""
-    train_data = load_dataset("cnn_dailymail", "3.0.0", split="train")
-    valid_data = load_dataset("cnn_dailymail", "3.0.0", split="validation")
+    train_data = load_dataset("cnn_dailymail", "3.0.0", split="train[:1%]")
+    valid_data = load_dataset("cnn_dailymail", "3.0.0", split="validation[:1%]")
     return train_data, valid_data
 
 

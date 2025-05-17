@@ -28,6 +28,7 @@ def collate_fn(batch):
     summary_masks = []
     
     max_chunks = max(len(item["chunks"]) for item in batch)
+    batch_size = len(batch)
     
     for item in batch:
         chunks = item["chunks"]
@@ -46,9 +47,21 @@ def collate_fn(batch):
     
     chunked_data = []
     for i in range(max_chunks):
+        input_ids_list = []
+        attention_mask_list = []
+        for item in chunked_inputs:
+            if len(item[i]["input_ids"]) > 0:
+                input_ids_list.append(item[i]["input_ids"])
+                attention_mask_list.append(item[i]["attention_mask"])
+            else:
+                # Crear tensores vacíos con tamaño de lote completo
+                max_len = max([len(x) for x in input_ids_list] or [1])  # Evitar max vacío
+                input_ids_list.append(torch.zeros(max_len, dtype=torch.long))
+                attention_mask_list.append(torch.zeros(max_len, dtype=torch.long))
+        
         chunk_batch = {
-            "input_ids": pad_sequence([item[i]["input_ids"] for item in chunked_inputs if len(item[i]["input_ids"]) > 0], batch_first=True, padding_value=0),
-            "attention_mask": pad_sequence([item[i]["attention_mask"] for item in chunked_inputs if len(item[i]["attention_mask"]) > 0], batch_first=True, padding_value=0)
+            "input_ids": pad_sequence(input_ids_list, batch_first=True, padding_value=0),
+            "attention_mask": pad_sequence(attention_mask_list, batch_first=True, padding_value=0)
         }
         chunked_data.append(chunk_batch)
     

@@ -5,6 +5,15 @@ from seq2seq import HierarchicalSeq2Seq
 from dataset import get_dataloader
 from loss import CombinedLoss
 import os
+import logging
+
+def setup_logging():
+    """Configura el registro de entrenamiento."""
+    logging.basicConfig(
+        filename="training.log",
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s"
+    )
 
 def save_checkpoint(model, optimizer, epoch, loss, path="checkpoints"):
     """Guarda un checkpoint del modelo."""
@@ -19,6 +28,7 @@ def save_checkpoint(model, optimizer, epoch, loss, path="checkpoints"):
 
 def train_model(model, train_loader, valid_loader, num_epochs=10, device="cuda", lr=1e-4):
     """Entrena el modelo Seq2Seq."""
+    setup_logging()
     model = model.to(device)
     optimizer = Adam(model.parameters(), lr=lr)
     loss_fn = CombinedLoss(lambda_penalty=0.1)
@@ -56,5 +66,6 @@ def train_model(model, train_loader, valid_loader, num_epochs=10, device="cuda",
             total_loss += loss.item()
         
         avg_loss = total_loss / len(train_loader)
+        logging.info(f"Epoch {epoch+1}, Loss: {avg_loss}")
         print(f"Epoch {epoch+1}, Loss: {avg_loss}")
         save_checkpoint(model, optimizer, epoch + 1, avg_loss)
